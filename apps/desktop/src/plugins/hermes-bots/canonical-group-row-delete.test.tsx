@@ -8,13 +8,15 @@
  */
 
 import type * as HermesSdk from '@hermes/plugin-sdk'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { atom } from 'nanostores'
+import { host } from '@hermes/plugin-sdk'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import type { WritableAtom } from 'nanostores'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
 import { translateBotsIn } from './i18n-test-helper'
 
 const { notify, requestProfile } = vi.hoisted(() => ({ notify: vi.fn(), requestProfile: vi.fn() }))
+const gateway = host.state.gateway as WritableAtom<string>
 
 vi.mock('@hermes/plugin-sdk', async importOriginal => {
   const sdk = await importOriginal<typeof HermesSdk>()
@@ -25,7 +27,7 @@ vi.mock('@hermes/plugin-sdk', async importOriginal => {
       ...sdk.host,
       notify,
       requestProfile,
-      state: { ...sdk.host.state, connectionId: atom<null | string>('local'), profile: atom('default') }
+      state: { ...sdk.host.state, connectionId: sdk.atom<null | string>('local'), profile: sdk.atom('default'), gateway: sdk.atom('open') }
     },
     usePluginI18n: () => translateBotsIn('en')
   }
@@ -40,6 +42,7 @@ let rooms: (typeof room)[] = []
 let refuse = ''
 
 beforeEach(() => {
+  gateway.set('open')
   rooms = [room]
   refuse = ''
   requestProfile.mockImplementation(async (_route: unknown, method: string, params: { room_id?: string }) => {
@@ -80,6 +83,28 @@ async function openDeleteConfirm() {
 
   return within(await screen.findByRole('dialog'))
 }
+
+it('recovers the group list automatically when the gateway connects and reconnects', async () => {
+  const connectedRequest = requestProfile.getMockImplementation()!
+  requestProfile.mockImplementation((...args) => {
+    if (gateway.get() !== 'open') { return Promise.reject(new Error('Hermes gateway is not connected')) }
+    return connectedRequest(...args)
+  })
+  gateway.set('closed')
+  render(<CanonicalGroupList onOpen={vi.fn()} />)
+  expect((await screen.findByRole('alert')).textContent).toBe('Hermes gateway is not connected')
+
+  act(() => gateway.set('open'))
+  expect(await screen.findByRole('button', { name: 'Launch crew' })).toBeTruthy()
+  expect(screen.queryByRole('alert')).toBeNull()
+
+  act(() => gateway.set('closed'))
+  await screen.findByRole('alert')
+  rooms = [{ ...room, name: 'Recovered crew' }]
+  act(() => gateway.set('open'))
+  expect(await screen.findByRole('button', { name: 'Recovered crew' })).toBeTruthy()
+  expect(screen.queryByRole('alert')).toBeNull()
+})
 
 it('deletes a gateway group from its row menu: confirm, disband on its gateway, gone from the list', async () => {
   const onOpen = vi.fn()
